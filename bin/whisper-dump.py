@@ -53,19 +53,23 @@ def read_header(map):
 
   for i in xrange(archiveCount):
     try:
-      (offset, secondsPerPoint, points) = struct.unpack(
+      (offset, secondsPerPoint, points, fmt) = struct.unpack(
         whisper.archiveInfoFormat,
         map[archiveOffset:archiveOffset + whisper.archiveInfoSize]
       )
     except (struct.error, ValueError, TypeError):
       raise whisper.CorruptWhisperFile("Unable to read archive %d metadata" % i)
 
+    parser = struct.Struct(fmt)
     archiveInfo = {
       'offset': offset,
       'secondsPerPoint': secondsPerPoint,
       'points': points,
       'retention': secondsPerPoint * points,
-      'size': points * whisper.pointSize,
+      'format': fmt,
+      'parser': parser,
+      'pointSize': parser.size,
+      'size': points * parser.size,
     }
     archives.append(archiveInfo)
     archiveOffset += whisper.archiveInfoSize
@@ -95,6 +99,8 @@ def dump_archive_headers(archives):
     print('  seconds per point: %d' % archive['secondsPerPoint'])
     print('  points: %d' % archive['points'])
     print('  retention: %d' % archive['retention'])
+    print('  format: %s' % archive['format'])
+    print('  point size: %d' % archive['pointSize'])
     print('  size: %d' % archive['size'])
     print("")
 
@@ -104,9 +110,8 @@ def dump_archives(archives, options):
     print('Archive %d data:' % i)
     offset = archive['offset']
     for point in xrange(archive['points']):
-      (timestamp, value) = struct.unpack(
-        whisper.pointFormat,
-        map[offset:offset + whisper.pointSize]
+      (timestamp, value) = archive['parser'].unpack(
+        map[offset:offset + archive['pointSize']]
       )
       if options.pretty:
         if options.time_format:
@@ -117,7 +122,7 @@ def dump_archives(archives, options):
       else:
         timestr = str(timestamp)
       print('%d: %s, %10.35g' % (point, timestr, value))
-      offset += whisper.pointSize
+      offset += archive['pointSize']
     print
 
 

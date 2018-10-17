@@ -109,11 +109,9 @@ floatFormat = "!f"
 floatSize = struct.calcsize(floatFormat)
 valueFormat = "!d"
 valueSize = struct.calcsize(valueFormat)
-pointFormat = "!Ld"
-pointSize = struct.calcsize(pointFormat)
 metadataFormat = "!2LfL"
 metadataSize = struct.calcsize(metadataFormat)
-archiveInfoFormat = "!3L"
+archiveInfoFormat = "!3L3s"
 archiveInfoSize = struct.calcsize(archiveInfoFormat)
 
 aggregationTypeToMethod = dict({
@@ -301,16 +299,20 @@ def __readHeader(fh):
   for i in xrange(archiveCount):
     packedArchiveInfo = fh.read(archiveInfoSize)
     try:
-      (offset, secondsPerPoint, points) = struct.unpack(archiveInfoFormat, packedArchiveInfo)
+      (offset, secondsPerPoint, points, fmt) = struct.unpack(archiveInfoFormat, packedArchiveInfo)
     except (struct.error, ValueError, TypeError):
       raise CorruptWhisperFile("Unable to read archive%d metadata" % i, fh.name)
 
+    parser = struct.Struct(fmt)
     archiveInfo = {
       'offset': offset,
       'secondsPerPoint': secondsPerPoint,
       'points': points,
       'retention': secondsPerPoint * points,
-      'size': points * pointSize,
+      'format': fmt,
+      'parser': parser,
+      'pointSize': parser.size,
+      'size': points * parser.size,
     }
     archives.append(archiveInfo)
 
@@ -476,7 +478,7 @@ def validateArchiveList(archiveList):
 
 
 def create(path, archiveList, xFilesFactor=None, aggregationMethod=None,
-           sparse=False, useFallocate=False):
+           sparse=False, useFallocate=False, dataFormat = 'd', timestampFormat = 'I', byteOrder = '='):
   """create(path,archiveList,xFilesFactor=0.5,aggregationMethod='average')
 
   path               is a string
@@ -515,8 +517,15 @@ def create(path, archiveList, xFilesFactor=None, aggregationMethod=None,
       headerSize = metadataSize + (archiveInfoSize * len(archiveList))
       archiveOffsetPointer = headerSize
 
-      for secondsPerPoint, points in archiveList:
-        archiveInfo = struct.pack(archiveInfoFormat, archiveOffsetPointer, secondsPerPoint, points)
+      if byteOrder == None: byteOrder = '<' if sys.byteorder == 'little' else '>'
+      if isinstance(dataFormat, basestring):
+        dataFormat = dataFormat.split(",")
+      if len(dataFormat) < len(archiveList):
+        dataFormat += [dataFormat[-1]] * (len(archiveList) - len(dataFormat))
+      for (secondsPerPoint, points), dataFormat1 in zip(archiveList, dataFormat):
+        pointFormat = byteOrder + timestampFormat + dataFormat1
+        pointSize = struct.calcsize(pointFormat)
+        archiveInfo = struct.pack(archiveInfoFormat, archiveOffsetPointer, secondsPerPoint, points, pointFormat)
         fh.write(archiveInfo)
         archiveOffsetPointer += (points * pointSize)
 
@@ -581,8 +590,10 @@ def __propagate(fh, header, timestamp, higher, lower):
   lowerIntervalStart = timestamp - (timestamp % lower['secondsPerPoint'])
 
   fh.seek(higher['offset'])
+  parser = higher['parser']
+  pointSize = parser.size
   packedPoint = fh.read(pointSize)
-  (higherBaseInterval, higherBaseValue) = struct.unpack(pointFormat, packedPoint)
+  (higherBaseInterval, higherBaseValue) = parser.unpack(packedPoint)
 
   if higherBaseInterval == 0:
     higherFirstOffset = higher['offset']
@@ -608,7 +619,7 @@ def __propagate(fh, header, timestamp, higher, lower):
     seriesString += fh.read(higherLastOffset - higher['offset'])
 
   # Now we unpack the series data we just read
-  byteOrder, pointTypes = pointFormat[0], pointFormat[1:]
+  byteOrder, pointTypes = parser.format[0], parser.format[1:]
   points = len(seriesString) // pointSize
   seriesFormat = byteOrder + (pointTypes * points)
   unpackedSeries = struct.unpack(seriesFormat, seriesString)
@@ -631,11 +642,13 @@ def __propagate(fh, header, timestamp, higher, lower):
 
   knownPercent = float(len(knownValues)) / float(len(neighborValues))
   if knownPercent >= xff:  # We have enough data to propagate a value!
+    parser = lower['parser']
+    pointSize = parser.size
     aggregateValue = aggregate(aggregationMethod, knownValues, neighborValues)
-    myPackedPoint = struct.pack(pointFormat, lowerIntervalStart, aggregateValue)
+    myPackedPoint = parser.pack(lowerIntervalStart, aggregateValue)
     fh.seek(lower['offset'])
     packedPoint = fh.read(pointSize)
-    (lowerBaseInterval, lowerBaseValue) = struct.unpack(pointFormat, packedPoint)
+    (lowerBaseInterval, lowerBaseValue) = parser.unpack(packedPoint)
 
     if lowerBaseInterval == 0:  # First propagated update to this lower archive
       fh.seek(lower['offset'])
@@ -654,6 +667,19 @@ def __propagate(fh, header, timestamp, higher, lower):
     return False
 
 
+int_bounds = {
+  'b': (-2**7, 2**7-1),
+  'B': (0, 2**8-1),
+  'h': (-2**15, 2**15-1),
+  'H': (0, 2**16-1),
+  'i': (-2**31, 2**31-1),
+  'I': (0, 2**32-1),
+  'l': (-2**31, 2**31-1),
+  'L': (0, 2**32-1),
+  'q': (-2**63, 2**63-1),
+  'Q': (0, 2**64-1),
+}
+
 def update(path, value, timestamp=None, now=None):
   """
   update(path, value, timestamp=None)
@@ -662,7 +688,6 @@ def update(path, value, timestamp=None, now=None):
   value is a float
   timestamp is either an int or float
   """
-  value = float(value)
   with open(path, 'r+b', BUFFERING) as fh:
     if CAN_FADVISE and FADVISE_RANDOM:
       posix_fadvise(fh.fileno(), 0, 0, POSIX_FADV_RANDOM)
@@ -694,20 +719,25 @@ def file_update(fh, value, timestamp, now=None):
     break
 
   # First we update the highest-precision archive
+  parser = archive['parser']
+  if parser.format[-1] in int_bounds:
+    bmin, bmax = int_bounds[parser.format[-1]]
+    value = min(bmax, max(bmin, int(value)))
+  else:
+    value = float(value)
   myInterval = timestamp - (timestamp % archive['secondsPerPoint'])
-  myPackedPoint = struct.pack(pointFormat, myInterval, value)
+  myPackedPoint = parser.pack(myInterval, value)
   fh.seek(archive['offset'])
-  packedPoint = fh.read(pointSize)
-  (baseInterval, baseValue) = struct.unpack(pointFormat, packedPoint)
+  packedPoint = fh.read(parser.size)
+  (baseInterval, baseValue) = parser.unpack(packedPoint)
 
   if baseInterval == 0:  # This file's first update
     fh.seek(archive['offset'])
     fh.write(myPackedPoint)
-    baseInterval = myInterval
   else:  # Not our first update
     timeDistance = myInterval - baseInterval
     pointDistance = timeDistance // archive['secondsPerPoint']
-    byteDistance = pointDistance * pointSize
+    byteDistance = pointDistance * parser.size
     myOffset = archive['offset'] + (byteDistance % archive['size'])
     fh.seek(myOffset)
     fh.write(myPackedPoint)
@@ -782,8 +812,15 @@ def file_update_many(fh, points, now=None):
 
 def __archive_update_many(fh, header, archive, points):
   step = archive['secondsPerPoint']
-  alignedPoints = [(timestamp - (timestamp % step), value)
-                   for (timestamp, value) in points]
+  parser = archive['parser']
+  pointSize = parser.size
+  if parser.format[-1] in int_bounds:
+    bmin, bmax = int_bounds[parser.format[-1]]
+    alignedPoints = [(timestamp - (timestamp % step), min(bmax, max(bmin, int(value))))
+                     for (timestamp, value) in points]
+  else:
+    alignedPoints = [(timestamp - (timestamp % step), value)
+                     for (timestamp, value) in points]
   # Create a packed string for each contiguous sequence of points
   packedStrings = []
   previousInterval = None
@@ -795,13 +832,13 @@ def __archive_update_many(fh, header, archive, points):
       continue
     (interval, value) = alignedPoints[i]
     if (not previousInterval) or (interval == previousInterval + step):
-      currentString += struct.pack(pointFormat, interval, value)
+      currentString += parser.pack(interval, value)
       previousInterval = interval
     else:
       numberOfPoints = len(currentString) // pointSize
       startInterval = previousInterval - (step * (numberOfPoints - 1))
       packedStrings.append((startInterval, currentString))
-      currentString = struct.pack(pointFormat, interval, value)
+      currentString = parser.pack(interval, value)
       previousInterval = interval
   if currentString:
     numberOfPoints = len(currentString) // pointSize
@@ -811,7 +848,7 @@ def __archive_update_many(fh, header, archive, points):
   # Read base point and determine where our writes will start
   fh.seek(archive['offset'])
   packedBasePoint = fh.read(pointSize)
-  (baseInterval, baseValue) = struct.unpack(pointFormat, packedBasePoint)
+  (baseInterval, baseValue) = parser.unpack(packedBasePoint)
   if baseInterval == 0:  # This file's first update
     baseInterval = packedStrings[0][0]  # Use our first string as the base, so we start at the start
 
@@ -957,9 +994,11 @@ archive on a read and request data older than the archive's retention
     # Zero-length time range: always include the next point
     untilInterval += step
 
+  parser = archive['parser']
+  pointSize = parser.size
   fh.seek(archive['offset'])
   packedPoint = fh.read(pointSize)
-  (baseInterval, baseValue) = struct.unpack(pointFormat, packedPoint)
+  (baseInterval, baseValue) = parser.unpack(packedPoint)
 
   if baseInterval == 0:
     points = (untilInterval - fromInterval) // step
@@ -970,13 +1009,13 @@ archive on a read and request data older than the archive's retention
   # Determine fromOffset
   timeDistance = fromInterval - baseInterval
   pointDistance = timeDistance // step
-  byteDistance = pointDistance * pointSize
+  byteDistance = pointDistance * parser.size
   fromOffset = archive['offset'] + (byteDistance % archive['size'])
 
   # Determine untilOffset
   timeDistance = untilInterval - baseInterval
   pointDistance = timeDistance // step
-  byteDistance = pointDistance * pointSize
+  byteDistance = pointDistance * parser.size
   untilOffset = archive['offset'] + (byteDistance % archive['size'])
 
   # Read all the points in the interval
@@ -990,7 +1029,7 @@ archive on a read and request data older than the archive's retention
     seriesString += fh.read(untilOffset - archive['offset'])
 
   # Now we unpack the series data we just read (anything faster than unpack?)
-  byteOrder, pointTypes = pointFormat[0], pointFormat[1:]
+  byteOrder, pointTypes = parser.format[0], parser.format[1:]
   points = len(seriesString) // pointSize
   seriesFormat = byteOrder + (pointTypes * points)
   unpackedSeries = struct.unpack(seriesFormat, seriesString)
