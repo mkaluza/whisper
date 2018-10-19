@@ -117,7 +117,7 @@ def dump_archives(archives, options, mm):
     if fmt in whisper.int_bounds:
       nan = whisper.int_bounds[fmt][2]
     else:
-      nan = float(nan)
+      nan = float("NaN")
 
     for point in xrange(archive['points']):
       value, = archive['parser'].unpack(

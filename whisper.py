@@ -604,7 +604,7 @@ def save_archive_headers(fh, archives):
     fh.write(packedArchiveInfo)
 
 
-def update_archive(fh, archive, timestamp, value):
+def update_archive(fh, archive, myInterval, value):
   parser = archive['parser']
   if parser.format[-1] in int_bounds:
     bmin, bmax, nan = int_bounds[parser.format[-1]]
@@ -612,8 +612,6 @@ def update_archive(fh, archive, timestamp, value):
   else:
     value = float(value)
     nan = float('NaN')
-
-  myInterval = timestamp - (timestamp % archive['secondsPerPoint'])
 
   myPackedPoint = parser.pack(value)
 
@@ -634,7 +632,6 @@ def update_archive(fh, archive, timestamp, value):
       fh.write(nan * pointIndex + myPackedPoint)
   archive['lastIndex'] = pointIndex
   archive['lastTimestamp'] = myInterval
-  return myInterval
 
 
 def __propagate(fh, header, timestamp, higher, lower):
@@ -692,7 +689,7 @@ def __propagate(fh, header, timestamp, higher, lower):
   if knownPercent >= xff:  # We have enough data to propagate a value!
     aggregateValue = aggregate(aggregationMethod, knownValues, neighborValues)
     #print "aggregate: %s for %s is %s" % (aggregationMethod, knownValues, aggregateValue)
-    update_archive(fh, lower, timestamp, aggregateValue)
+    update_archive(fh, lower, lowerIntervalStart, aggregateValue)
 
     return True
 
@@ -739,7 +736,8 @@ def file_update(fh, value, timestamp, now=None):
     break
 
   # First we update the highest-precision archive
-  myInterval = update_archive(fh, archive, timestamp, value)
+  myInterval = timestamp - (timestamp % archive['secondsPerPoint'])
+  update_archive(fh, archive, myInterval, value)
 
   # Now we propagate the update to lower-precision archives
   higher = archive
@@ -806,6 +804,8 @@ def file_update_many(fh, points, now=None):
     currentPoints.reverse()
     __archive_update_many(fh, header, currentArchive, currentPoints)
 
+  save_archive_headers(fh, header['archives'])
+
   if AUTOFLUSH:
     fh.flush()
     os.fsync(fh.fileno())
@@ -816,52 +816,63 @@ def __archive_update_many(fh, header, archive, points):
   parser = archive['parser']
   pointSize = parser.size
   if parser.format[-1] in int_bounds:
-    bmin, bmax = int_bounds[parser.format[-1]]
+    bmin, bmax, nan = int_bounds[parser.format[-1]]
     alignedPoints = [(timestamp - (timestamp % step), min(bmax, max(bmin, int(value))))
                      for (timestamp, value) in points]
   else:
     alignedPoints = [(timestamp - (timestamp % step), value)
                      for (timestamp, value) in points]
+    nan = float('NaN')
+  nan = parser.pack(nan)
+
   # Create a packed string for each contiguous sequence of points
   packedStrings = []
   previousInterval = None
-  currentString = b""
+  currentString = []
   lenAlignedPoints = len(alignedPoints)
   for i in xrange(0, lenAlignedPoints):
     # Take last point in run of points with duplicate intervals
     if i + 1 < lenAlignedPoints and alignedPoints[i][0] == alignedPoints[i + 1][0]:
       continue
     (interval, value) = alignedPoints[i]
-    if (not previousInterval) or (interval == previousInterval + step):
-      currentString += parser.pack(interval, value)
+    if (not previousInterval) or (interval == previousInterval + step): #FIXME use map()
+      currentString.append(parser.pack(value))
       previousInterval = interval
     else:
-      numberOfPoints = len(currentString) // pointSize
+      numberOfPoints = len(currentString)
       startInterval = previousInterval - (step * (numberOfPoints - 1))
-      packedStrings.append((startInterval, currentString))
-      currentString = parser.pack(interval, value)
+      packedStrings.append((startInterval, "".join(currentString)))
+      currentString = [parser.pack(value)]
       previousInterval = interval
   if currentString:
-    numberOfPoints = len(currentString) // pointSize
+    numberOfPoints = len(currentString)
     startInterval = previousInterval - (step * (numberOfPoints - 1))
-    packedStrings.append((startInterval, currentString))
+    packedStrings.append((startInterval, "".join(currentString)))
 
   # Read base point and determine where our writes will start
-  fh.seek(archive['offset'])
-  packedBasePoint = fh.read(pointSize)
-  (baseInterval, baseValue) = parser.unpack(packedBasePoint)
-  if baseInterval == 0:  # This file's first update
-    baseInterval = packedStrings[0][0]  # Use our first string as the base, so we start at the start
 
   # Write all of our packed strings in locations determined by the baseInterval
   for (interval, packedString) in packedStrings:
+    baseInterval = archive['lastTimestamp']  # Use our first string as the base, so we start at the start
     timeDistance = interval - baseInterval
     pointDistance = timeDistance // step
-    byteDistance = pointDistance * pointSize
-    myOffset = archive['offset'] + (byteDistance % archive['size'])
-    fh.seek(myOffset)
+    pointIndex = (archive['lastIndex'] + pointDistance) % archive['points']
+
+    myOffset = archive['offset'] + pointIndex * pointSize
     archiveEnd = archive['offset'] + archive['size']
     bytesBeyond = (myOffset + len(packedString)) - archiveEnd
+
+    #TODO join those two ifs?
+    if pointDistance > 1:
+      fh.seek(archive['offset'] + (archive['lastIndex'] + 1) * parser.size)
+      if archive['lastIndex'] < pointIndex:
+        fh.write(nan * (pointIndex - archive['lastIndex'] - 1))
+      else:
+        fh.write(nan * (archive['points'] - archive['lastIndex'] - 1))
+        fh.seek(archive['offset'])
+        fh.write(nan * pointIndex)
+    else:
+      fh.seek(myOffset)
 
     if bytesBeyond > 0:
       fh.write(packedString[:-bytesBeyond])
@@ -874,6 +885,10 @@ def __archive_update_many(fh, header, archive, points):
       fh.write(packedString[-bytesBeyond:])
     else:
       fh.write(packedString)
+
+    numberOfPoints = len(packedString) / pointSize - 1
+    archive['lastIndex'] = (pointIndex  + numberOfPoints) % archive['points']
+    archive['lastTimestamp'] = interval + numberOfPoints * step
 
   # Now we propagate the updates to lower-precision archives
   higher = archive
