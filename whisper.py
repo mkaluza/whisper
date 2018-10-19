@@ -588,27 +588,26 @@ def __propagate(fh, header, timestamp, higher, lower):
   higherBaseInterval = point_unpack(fh.read(pointSize))[0]
 
   if higherBaseInterval == 0:
-    higherFirstOffset = higher['offset']
+    relativeFirstOffset = 0
   else:
     timeDistance = lowerIntervalStart - higherBaseInterval
     pointDistance = timeDistance // higher['secondsPerPoint']
     byteDistance = pointDistance * pointSize
-    higherFirstOffset = higher['offset'] + (byteDistance % higher['size'])
+    relativeFirstOffset = (byteDistance % higher['size'])
 
   higherPoints = lower['secondsPerPoint'] // higher['secondsPerPoint']
   higherSize = higherPoints * pointSize
-  relativeFirstOffset = higherFirstOffset - higher['offset']
   relativeLastOffset = (relativeFirstOffset + higherSize) % higher['size']
-  higherLastOffset = relativeLastOffset + higher['offset']
+  higherFirstOffset = relativeFirstOffset + higher['offset']
   fh.seek(higherFirstOffset)
 
-  if higherFirstOffset < higherLastOffset:  # We don't wrap the archive
-    seriesString = fh.read(higherLastOffset - higherFirstOffset)
+  if relativeFirstOffset < relativeLastOffset:  # We don't wrap the archive
+    seriesString = fh.read(higherSize)
   else:  # We do wrap the archive
-    higherEnd = higher['offset'] + higher['size']
-    seriesString = fh.read(higherEnd - higherFirstOffset)
+    higherTail = higher['size'] - relativeFirstOffset
+    seriesString = fh.read(higherTail)
     fh.seek(higher['offset'])
-    seriesString += fh.read(higherLastOffset - higher['offset'])
+    seriesString += fh.read(relativeLastOffset)
 
   # Now we unpack the series data we just read
   byteOrder, pointTypes = pointFormat[0], pointFormat[1:]
@@ -632,7 +631,7 @@ def __propagate(fh, header, timestamp, higher, lower):
   if not knownValues:
     return False
 
-  knownPercent = float(len(knownValues)) / float(len(neighborValues))
+  knownPercent = float(len(knownValues)) / points
   if knownPercent >= xff:  # We have enough data to propagate a value!
     aggregateValue = aggregate(aggregationMethod, knownValues, neighborValues)
     myPackedPoint = point_pack(lowerIntervalStart, aggregateValue)
