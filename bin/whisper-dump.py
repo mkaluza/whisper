@@ -36,15 +36,15 @@ else:
 
 def mmap_file(filename):
   fd = os.open(filename, os.O_RDONLY)
-  map = mmap.mmap(fd, os.fstat(fd).st_size, prot=mmap.PROT_READ)
+  mm = mmap.mmap(fd, os.fstat(fd).st_size, prot=mmap.PROT_READ)
   os.close(fd)
-  return map
+  return mm
 
 
-def read_header(map):
+def read_header(mm):
   try:
     (aggregationType, maxRetention, xFilesFactor, archiveCount) \
-      = struct.unpack(whisper.metadataFormat, map[:whisper.metadataSize])
+      = struct.unpack(whisper.metadataFormat, mm[:whisper.metadataSize])
   except (struct.error, ValueError, TypeError):
     raise whisper.CorruptWhisperFile("Unable to unpack header")
 
@@ -55,7 +55,7 @@ def read_header(map):
     try:
       (offset, secondsPerPoint, points, fmt) = struct.unpack(
         whisper.archiveInfoFormat,
-        map[archiveOffset:archiveOffset + whisper.archiveInfoSize]
+        mm[archiveOffset:archiveOffset + whisper.archiveInfoSize]
       )
     except (struct.error, ValueError, TypeError):
       raise whisper.CorruptWhisperFile("Unable to read archive %d metadata" % i)
@@ -111,7 +111,7 @@ def dump_archives(archives, options):
     offset = archive['offset']
     for point in xrange(archive['points']):
       (timestamp, value) = archive['parser'].unpack(
-        map[offset:offset + archive['pointSize']]
+        mm[offset:offset + archive['pointSize']]
       )
       if options.pretty:
         if options.time_format:
@@ -129,7 +129,7 @@ def dump_archives(archives, options):
 if not os.path.exists(path):
   raise SystemExit('[ERROR] File "%s" does not exist!' % path)
 
-map = mmap_file(path)
-header = read_header(map)
+mm = mmap_file(path)
+header = read_header(mm)
 dump_header(header)
 dump_archives(header['archives'], options)
