@@ -111,7 +111,7 @@ valueFormat = "!d"
 valueSize = struct.calcsize(valueFormat)
 metadataFormat = "!2LfL"
 metadataSize = struct.calcsize(metadataFormat)
-archiveInfoFormat = "!3L3s"
+archiveInfoFormat = "!3L2L2s"
 archiveInfoSize = struct.calcsize(archiveInfoFormat)
 
 aggregationTypeToMethod = dict({
@@ -138,6 +138,18 @@ UnitMultipliers = {
   'years': 86400 * 365
 }
 
+int_bounds = {
+  'b': (-2**7+1, 2**7-1, -2**7),
+  'B': (0, 2**8-2, 2**8-1),
+  'h': (-2**15+1, 2**15-1, -2**15),
+  'H': (0, 2**16-2, 2**16-1),
+  'i': (-2**31+1, 2**31-1, -2**31),
+  'I': (0, 2**32-2, 2**32-1),
+  'l': (-2**31+1, 2**31-1, -2**31),
+  'L': (0, 2**32-2, 2**32-1),
+  'q': (-2**63+1, 2**63-1, -2**63),
+  'Q': (0, 2**64-2, 2**64-1),
+}
 
 def getUnitString(s):
   for value in ('seconds', 'minutes', 'hours', 'days', 'weeks', 'years'):
@@ -299,7 +311,7 @@ def __readHeader(fh):
   for i in xrange(archiveCount):
     packedArchiveInfo = fh.read(archiveInfoSize)
     try:
-      (offset, secondsPerPoint, points, fmt) = struct.unpack(archiveInfoFormat, packedArchiveInfo)
+      (offset, secondsPerPoint, points, lastTimestamp, lastIndex, fmt) = struct.unpack(archiveInfoFormat, packedArchiveInfo)
     except (struct.error, ValueError, TypeError):
       raise CorruptWhisperFile("Unable to read archive%d metadata" % i, fh.name)
 
@@ -313,6 +325,8 @@ def __readHeader(fh):
       'parser': parser,
       'pointSize': parser.size,
       'size': points * parser.size,
+      'lastTimestamp': lastTimestamp,
+      'lastIndex': lastIndex,
     }
     archives.append(archiveInfo)
 
@@ -478,7 +492,7 @@ def validateArchiveList(archiveList):
 
 
 def create(path, archiveList, xFilesFactor=None, aggregationMethod=None,
-           sparse=False, useFallocate=False, dataFormat = 'd', timestampFormat = 'I', byteOrder = '='):
+           sparse=False, useFallocate=False, dataFormat = 'd', byteOrder = '='):
   """create(path,archiveList,xFilesFactor=0.5,aggregationMethod='average')
 
   path               is a string
@@ -523,9 +537,9 @@ def create(path, archiveList, xFilesFactor=None, aggregationMethod=None,
       if len(dataFormat) < len(archiveList):
         dataFormat += [dataFormat[-1]] * (len(archiveList) - len(dataFormat))
       for (secondsPerPoint, points), dataFormat1 in zip(archiveList, dataFormat):
-        pointFormat = byteOrder + timestampFormat + dataFormat1
+        pointFormat = byteOrder + dataFormat1
         pointSize = struct.calcsize(pointFormat)
-        archiveInfo = struct.pack(archiveInfoFormat, archiveOffsetPointer, secondsPerPoint, points, pointFormat)
+        archiveInfo = struct.pack(archiveInfoFormat, archiveOffsetPointer, secondsPerPoint, points, 0, 0, pointFormat)
         fh.write(archiveInfo)
         archiveOffsetPointer += (points * pointSize)
 
@@ -583,102 +597,108 @@ def aggregate(aggregationMethod, knownValues, neighborValues=None):
       "Unrecognized aggregation method %s" % aggregationMethod)
 
 
+def save_archive_headers(fh, archives):
+  fh.seek(metadataSize)
+  for arch in archives:
+    packedArchiveInfo = struct.pack(archiveInfoFormat, arch['offset'], arch['secondsPerPoint'], arch['points'], arch['lastTimestamp'], arch['lastIndex'], arch['format'])
+    fh.write(packedArchiveInfo)
+
+
+def update_archive(fh, archive, timestamp, value):
+  parser = archive['parser']
+  if parser.format[-1] in int_bounds:
+    bmin, bmax, nan = int_bounds[parser.format[-1]]
+    value = min(bmax, max(bmin, int(value)))
+  else:
+    value = float(value)
+    nan = float('NaN')
+
+  myInterval = timestamp - (timestamp % archive['secondsPerPoint'])
+
+  myPackedPoint = parser.pack(value)
+
+  timeDistance = myInterval - archive['lastTimestamp']
+  pointDistance = timeDistance // archive['secondsPerPoint']
+  pointIndex = (archive['lastIndex'] + pointDistance) % archive['points']
+  if pointDistance <= 1:
+    fh.seek(archive['offset'] + pointIndex * parser.size)
+    fh.write(myPackedPoint)
+  else:
+    nan = parser.pack(nan)
+    fh.seek(archive['offset'] + (archive['lastIndex'] + 1) * parser.size)
+    if archive['lastIndex'] < pointIndex:
+      fh.write(nan * (pointIndex - archive['lastIndex'] - 1) + myPackedPoint)
+    else:
+      fh.write(nan * (archive['points'] - archive['lastIndex'] - 1))
+      fh.seek(archive['offset'])
+      fh.write(nan * pointIndex + myPackedPoint)
+  archive['lastIndex'] = pointIndex
+  archive['lastTimestamp'] = myInterval
+  return myInterval
+
+
 def __propagate(fh, header, timestamp, higher, lower):
   aggregationMethod = header['aggregationMethod']
   xff = header['xFilesFactor']
 
   lowerIntervalStart = timestamp - (timestamp % lower['secondsPerPoint'])
 
-  fh.seek(higher['offset'])
-  parser = higher['parser']
-  pointSize = parser.size
-  packedPoint = fh.read(pointSize)
-  (higherBaseInterval, higherBaseValue) = parser.unpack(packedPoint)
+  pointSize = higher['pointSize']
+  higherBaseInterval = higher['lastTimestamp']
 
   if higherBaseInterval == 0:
-    higherFirstOffset = higher['offset']
+    relativeFirstOffset = 0
+    pointDistance = 0
   else:
     timeDistance = lowerIntervalStart - higherBaseInterval
     pointDistance = timeDistance // higher['secondsPerPoint']
-    byteDistance = pointDistance * pointSize
-    higherFirstOffset = higher['offset'] + (byteDistance % higher['size'])
+    pointIndex = (higher['lastIndex'] + pointDistance) % higher['points']
+    relativeFirstOffset = pointIndex * pointSize
 
-  higherPoints = lower['secondsPerPoint'] // higher['secondsPerPoint']
+  totalPoints = lower['secondsPerPoint'] // higher['secondsPerPoint']
+  higherPoints = -pointDistance + 1
   higherSize = higherPoints * pointSize
-  relativeFirstOffset = higherFirstOffset - higher['offset']
   relativeLastOffset = (relativeFirstOffset + higherSize) % higher['size']
+  higherFirstOffset = relativeFirstOffset + higher['offset']
   higherLastOffset = relativeLastOffset + higher['offset']
   fh.seek(higherFirstOffset)
 
-  if higherFirstOffset < higherLastOffset:  # We don't wrap the archive
-    seriesString = fh.read(higherLastOffset - higherFirstOffset)
+  if relativeFirstOffset < relativeLastOffset:  # We don't wrap the archive
+    seriesString = fh.read(higherSize)
   else:  # We do wrap the archive
-    higherEnd = higher['offset'] + higher['size']
-    seriesString = fh.read(higherEnd - higherFirstOffset)
+    higherTail = higher['size'] - relativeFirstOffset
+    seriesString = fh.read(higherTail)
     fh.seek(higher['offset'])
-    seriesString += fh.read(higherLastOffset - higher['offset'])
+    seriesString += fh.read(relativeLastOffset)
 
   # Now we unpack the series data we just read
-  byteOrder, pointTypes = parser.format[0], parser.format[1:]
-  points = len(seriesString) // pointSize
-  seriesFormat = byteOrder + (pointTypes * points)
+  higherFormat = higher['format']
+  byteOrder, pointTypes = higherFormat[0], higherFormat[1:]
+  seriesFormat = byteOrder + (pointTypes * higherPoints)
   unpackedSeries = struct.unpack(seriesFormat, seriesString)
 
   # And finally we construct a list of values
-  neighborValues = [None] * points
-  currentInterval = lowerIntervalStart
-  step = higher['secondsPerPoint']
+  if pointTypes in int_bounds:
+    nan = int_bounds[pointTypes][2]
+  else:
+    nan = float('NaN')
 
-  for i in xrange(0, len(unpackedSeries), 2):
-    pointTime = unpackedSeries[i]
-    if pointTime == currentInterval:
-      neighborValues[i // 2] = unpackedSeries[i + 1]
-    currentInterval += step
-
-  # Propagate aggregateValue to propagate from neighborValues if we have enough known points
-  knownValues = [v for v in neighborValues if v is not None]
+  knownValues = [v for v in unpackedSeries if v != nan]
+  neighborValues = (v if v != nan else 0 for v  in unpackedSeries)
   if not knownValues:
     return False
 
-  knownPercent = float(len(knownValues)) / float(len(neighborValues))
+  knownPercent = float(len(knownValues)) / totalPoints
   if knownPercent >= xff:  # We have enough data to propagate a value!
-    parser = lower['parser']
-    pointSize = parser.size
     aggregateValue = aggregate(aggregationMethod, knownValues, neighborValues)
-    myPackedPoint = parser.pack(lowerIntervalStart, aggregateValue)
-    fh.seek(lower['offset'])
-    packedPoint = fh.read(pointSize)
-    (lowerBaseInterval, lowerBaseValue) = parser.unpack(packedPoint)
-
-    if lowerBaseInterval == 0:  # First propagated update to this lower archive
-      fh.seek(lower['offset'])
-      fh.write(myPackedPoint)
-    else:  # Not our first propagated update to this lower archive
-      timeDistance = lowerIntervalStart - lowerBaseInterval
-      pointDistance = timeDistance // lower['secondsPerPoint']
-      byteDistance = pointDistance * pointSize
-      lowerOffset = lower['offset'] + (byteDistance % lower['size'])
-      fh.seek(lowerOffset)
-      fh.write(myPackedPoint)
+    #print "aggregate: %s for %s is %s" % (aggregationMethod, knownValues, aggregateValue)
+    update_archive(fh, lower, timestamp, aggregateValue)
 
     return True
 
   else:
     return False
 
-
-int_bounds = {
-  'b': (-2**7, 2**7-1),
-  'B': (0, 2**8-1),
-  'h': (-2**15, 2**15-1),
-  'H': (0, 2**16-1),
-  'i': (-2**31, 2**31-1),
-  'I': (0, 2**32-1),
-  'l': (-2**31, 2**31-1),
-  'L': (0, 2**32-1),
-  'q': (-2**63, 2**63-1),
-  'Q': (0, 2**64-1),
-}
 
 def update(path, value, timestamp=None, now=None):
   """
@@ -719,28 +739,7 @@ def file_update(fh, value, timestamp, now=None):
     break
 
   # First we update the highest-precision archive
-  parser = archive['parser']
-  if parser.format[-1] in int_bounds:
-    bmin, bmax = int_bounds[parser.format[-1]]
-    value = min(bmax, max(bmin, int(value)))
-  else:
-    value = float(value)
-  myInterval = timestamp - (timestamp % archive['secondsPerPoint'])
-  myPackedPoint = parser.pack(myInterval, value)
-  fh.seek(archive['offset'])
-  packedPoint = fh.read(parser.size)
-  (baseInterval, baseValue) = parser.unpack(packedPoint)
-
-  if baseInterval == 0:  # This file's first update
-    fh.seek(archive['offset'])
-    fh.write(myPackedPoint)
-  else:  # Not our first update
-    timeDistance = myInterval - baseInterval
-    pointDistance = timeDistance // archive['secondsPerPoint']
-    byteDistance = pointDistance * parser.size
-    myOffset = archive['offset'] + (byteDistance % archive['size'])
-    fh.seek(myOffset)
-    fh.write(myPackedPoint)
+  myInterval = update_archive(fh, archive, timestamp, value)
 
   # Now we propagate the update to lower-precision archives
   higher = archive
@@ -748,6 +747,8 @@ def file_update(fh, value, timestamp, now=None):
     if not __propagate(fh, header, myInterval, higher, lower):
       break
     higher = lower
+
+  save_archive_headers(fh, header['archives'])
 
   if AUTOFLUSH:
     fh.flush()

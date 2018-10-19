@@ -102,15 +102,25 @@ def dump_archive_headers(archives):
     print('  format: %s' % archive['format'])
     print('  point size: %d' % archive['pointSize'])
     print('  size: %d' % archive['size'])
+    print('  last timestamp: %d' % archive['lastTimestamp'])
+    print('  last index: %d' % archive['lastIndex'])
     print("")
 
 
-def dump_archives(archives, options):
+def dump_archives(archives, options, mm):
   for i, archive in enumerate(archives):
     print('Archive %d data:' % i)
     offset = archive['offset']
+    idx = archive['lastIndex']
+    timestamp = archive['lastTimestamp'] - idx * archive['secondsPerPoint']
+    fmt = archive['format'][-1]
+    if fmt in whisper.int_bounds:
+      nan = whisper.int_bounds[fmt][2]
+    else:
+      nan = float(nan)
+
     for point in xrange(archive['points']):
-      (timestamp, value) = archive['parser'].unpack(
+      value, = archive['parser'].unpack(
         mm[offset:offset + archive['pointSize']]
       )
       if options.pretty:
@@ -121,8 +131,16 @@ def dump_archives(archives, options):
           timestr = time.ctime(timestamp)
       else:
         timestr = str(timestamp)
-      print('%d: %s, %10.35g' % (point, timestr, value))
+      if value != nan:
+        value = '%10.35g' % value
+      else:
+        value = ""
+      print('%d: %s, %s' % (point, timestr, value))
       offset += archive['pointSize']
+      if timestamp == archive['lastTimestamp']:
+        timestamp -= archive['retention']
+      timestamp += archive['secondsPerPoint']
+      if timestamp < 0: break
     print
 
 
@@ -130,6 +148,6 @@ if not os.path.exists(path):
   raise SystemExit('[ERROR] File "%s" does not exist!' % path)
 
 mm = mmap_file(path)
-header = read_header(mm)
+header = whisper.__readHeader(mm)
 dump_header(header)
-dump_archives(header['archives'], options)
+dump_archives(header['archives'], options, mm)
