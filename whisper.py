@@ -787,26 +787,26 @@ def __archive_update_many(fh, header, archive, points):
   # Create a packed string for each contiguous sequence of points
   packedStrings = []
   previousInterval = None
-  currentString = b""
   lenAlignedPoints = len(alignedPoints)
+  currentString = []
   for i in xrange(0, lenAlignedPoints):
     # Take last point in run of points with duplicate intervals
     if i + 1 < lenAlignedPoints and alignedPoints[i][0] == alignedPoints[i + 1][0]:
       continue
     (interval, value) = alignedPoints[i]
     if (not previousInterval) or (interval == previousInterval + step):
-      currentString += point_pack(interval, value)
+      currentString.append(point_pack(interval, value))
       previousInterval = interval
     else:
-      numberOfPoints = len(currentString) // pointSize
+      numberOfPoints = len(currentString)
       startInterval = previousInterval - (step * (numberOfPoints - 1))
-      packedStrings.append((startInterval, currentString))
-      currentString = point_pack(interval, value)
+      packedStrings.append((startInterval, "".join(currentString)))
+      currentString = [point_pack(interval, value)]
       previousInterval = interval
   if currentString:
-    numberOfPoints = len(currentString) // pointSize
+    numberOfPoints = len(currentString)
     startInterval = previousInterval - (step * (numberOfPoints - 1))
-    packedStrings.append((startInterval, currentString))
+    packedStrings.append((startInterval, "".join(currentString)))
 
   # Read base point and determine where our writes will start
   fh.seek(archive['offset'])
