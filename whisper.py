@@ -492,7 +492,7 @@ def validateArchiveList(archiveList):
 
 
 def create(path, archiveList, xFilesFactor=None, aggregationMethod=None,
-           sparse=False, useFallocate=False, dataFormat = 'd', byteOrder = '='):
+           sparse=False, useFallocate=False, dataformat = 'd', byteorder = '='):
   """create(path,archiveList,xFilesFactor=0.5,aggregationMethod='average')
 
   path               is a string
@@ -531,13 +531,13 @@ def create(path, archiveList, xFilesFactor=None, aggregationMethod=None,
       headerSize = metadataSize + (archiveInfoSize * len(archiveList))
       archiveOffsetPointer = headerSize
 
-      if byteOrder == None: byteOrder = '<' if sys.byteorder == 'little' else '>'
-      if isinstance(dataFormat, basestring):
-        dataFormat = dataFormat.split(",")
-      if len(dataFormat) < len(archiveList):
-        dataFormat += [dataFormat[-1]] * (len(archiveList) - len(dataFormat))
-      for (secondsPerPoint, points), dataFormat1 in zip(archiveList, dataFormat):
-        pointFormat = byteOrder + dataFormat1
+      if byteorder == None: byteorder = '<' if sys.byteorder == 'little' else '>'
+      if isinstance(dataformat, basestring):
+        dataformat = dataformat.split(",")
+      if len(dataformat) < len(archiveList):
+        dataformat += [dataformat[-1]] * (len(archiveList) - len(dataformat))
+      for (secondsPerPoint, points), dataFormat1 in zip(archiveList, dataformat):
+        pointFormat = byteorder + dataFormat1
         pointSize = struct.calcsize(pointFormat)
         archiveInfo = struct.pack(archiveInfoFormat, archiveOffsetPointer, secondsPerPoint, points, 0, 0, pointFormat)
         fh.write(archiveInfo)
