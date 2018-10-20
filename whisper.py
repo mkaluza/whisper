@@ -1012,10 +1012,8 @@ archive on a read and request data older than the archive's retention
 
   parser = archive['parser']
   pointSize = parser.size
-  fh.seek(archive['offset'])
-  packedPoint = fh.read(pointSize)
-  (baseInterval, baseValue) = parser.unpack(packedPoint)
 
+  baseInterval = archive['lastTimestamp']
   if baseInterval == 0:
     points = (untilInterval - fromInterval) // step
     timeInfo = (fromInterval, untilInterval, step)
@@ -1025,14 +1023,14 @@ archive on a read and request data older than the archive's retention
   # Determine fromOffset
   timeDistance = fromInterval - baseInterval
   pointDistance = timeDistance // step
-  byteDistance = pointDistance * parser.size
-  fromOffset = archive['offset'] + (byteDistance % archive['size'])
+  pointIndex = (archive['lastIndex'] + pointDistance) % archive['points']
+  fromOffset = archive['offset'] + pointIndex * parser.size
 
   # Determine untilOffset
-  timeDistance = untilInterval - baseInterval
+  timeDistance = min(untilInterval - baseInterval, step)
   pointDistance = timeDistance // step
-  byteDistance = pointDistance * parser.size
-  untilOffset = archive['offset'] + (byteDistance % archive['size'])
+  pointIndex = (archive['lastIndex'] + pointDistance) % archive['points']
+  untilOffset = archive['offset'] + pointIndex * parser.size
 
   # Read all the points in the interval
   fh.seek(fromOffset)
@@ -1050,16 +1048,15 @@ archive on a read and request data older than the archive's retention
   seriesFormat = byteOrder + (pointTypes * points)
   unpackedSeries = struct.unpack(seriesFormat, seriesString)
 
-  # And finally we construct a list of values (optimize this!)
-  valueList = [None] * points  # Pre-allocate entire list for speed
-  currentInterval = fromInterval
+  if pointTypes in int_bounds:
+    nan = int_bounds[pointTypes][2]
+  else:
+    nan = float('NaN')
 
-  for i in xrange(0, len(unpackedSeries), 2):
-    pointTime = unpackedSeries[i]
-    if pointTime == currentInterval:
-      pointValue = unpackedSeries[i + 1]
-      valueList[i // 2] = pointValue  # In-place reassignment is faster than append()
-    currentInterval += step
+  valueList = [v if v != nan else None for v in unpackedSeries]
+  if untilInterval - baseInterval > step:
+    n = (untilInterval - baseInterval) // step - 1
+    valueList += [None] * n
 
   timeInfo = (fromInterval, untilInterval, step)
   return (timeInfo, valueList)
