@@ -26,6 +26,7 @@
 #           Point = timestamp,value
 
 import itertools
+import math
 import operator
 import os
 import re
@@ -1050,10 +1051,11 @@ archive on a read and request data older than the archive's retention
 
   if pointTypes in int_bounds:
     nan = int_bounds[pointTypes][2]
+    valueList = [None if v == nan else v for v in unpackedSeries]
   else:
-    nan = float('NaN')
+    isnan = math.isnan
+    valueList = [None if isnan(v) else v for v in unpackedSeries]
 
-  valueList = [v if v != nan else None for v in unpackedSeries]
   if untilInterval - baseInterval > step:
     n = (untilInterval - baseInterval) // step - 1
     valueList += [None] * n
