@@ -324,11 +324,9 @@ def __readHeader(fh):
       'offset': offset,
       'secondsPerPoint': secondsPerPoint,
       'points': points,
-      'retention': secondsPerPoint * points,
-      'format': fmt,
+      'retention': secondsPerPoint * points,        #TODO this might be removed
       'parser': parser,
-      'pointSize': parser.size,
-      'size': points * parser.size,
+      'size': points * parser.size,                 #TODO this might be removed
       'lastTimestamp': lastTimestamp,
       'lastIndex': lastIndex,
     }
@@ -605,7 +603,7 @@ def aggregate(aggregationMethod, knownValues, neighborValues=None):
 def save_archive_headers(fh, archives):
   fh.seek(metadataSize)
   for arch in archives:
-    packedArchiveInfo = struct.pack(archiveInfoFormat, arch['offset'], arch['secondsPerPoint'], arch['points'], arch['lastTimestamp'], arch['lastIndex'], arch['format'])
+    packedArchiveInfo = struct.pack(archiveInfoFormat, arch['offset'], arch['secondsPerPoint'], arch['points'], arch['lastTimestamp'], arch['lastIndex'], arch['parser'].format)
     fh.write(packedArchiveInfo)
 
 
@@ -645,7 +643,8 @@ def __propagate(fh, header, timestamp, higher, lower):
 
   lowerIntervalStart = timestamp - (timestamp % lower['secondsPerPoint'])
 
-  pointSize = higher['pointSize']
+  higherParser = higher['parser']
+  pointSize = higherParser.size
   higherBaseInterval = higher['lastTimestamp']
 
   if higherBaseInterval == 0:
@@ -674,7 +673,7 @@ def __propagate(fh, header, timestamp, higher, lower):
     seriesString += fh.read(relativeLastOffset)
 
   # Now we unpack the series data we just read
-  higherFormat = higher['format']
+  higherFormat = higherParser.format
   byteOrder, pointTypes = higherFormat[0], higherFormat[1:]
   seriesFormat = byteOrder + (pointTypes * higherPoints)
   unpackedSeries = struct.unpack(seriesFormat, seriesString)
