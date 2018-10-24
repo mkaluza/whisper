@@ -115,6 +115,7 @@ metadataFormat = "!2LfL"
 metadataSize = struct.calcsize(metadataFormat)
 archiveInfoFormat = "!3L2L2s"
 archiveInfoSize = struct.calcsize(archiveInfoFormat)
+archiveInfoParser = struct.Struct(archiveInfoFormat)
 
 aggregationTypeToMethod = dict({
   1: 'average',
@@ -633,9 +634,8 @@ def aggregate(aggregationMethod, knownValues, neighborValues=None):
 
 def save_archive_headers(fh, archives):
   fh.seek(metadataSize)
-  for arch in archives:
-    packedArchiveInfo = struct.pack(archiveInfoFormat, arch.offset, arch.secondsPerPoint, arch.points, arch.lastTimestamp, arch.lastIndex, arch.parser.format)
-    fh.write(packedArchiveInfo)
+  pack = archiveInfoParser.pack
+  fh.write("".join([pack(arch.offset, arch.secondsPerPoint, arch.points, arch.lastTimestamp, arch.lastIndex, arch.parser.format) for arch in archives]))
 
 
 def update_archive(fh, archive, myInterval, value):
