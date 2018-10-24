@@ -517,6 +517,8 @@ def create(path, archiveList, xFilesFactor=None, aggregationMethod=None,
   if os.path.exists(path):
     raise InvalidConfiguration("File %s already exists!" % path)
 
+  if CACHE_HEADERS and path in __headerCache: del __headerCache[path]
+
   with open(path, 'wb', BUFFERING) as fh:
     try:
       if LOCK:
