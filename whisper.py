@@ -26,7 +26,7 @@
 #           Point = timestamp,value
 
 import itertools
-import math
+from math import isnan
 import operator
 import os
 import re
@@ -712,11 +712,12 @@ def __propagate(fh, header, timestamp, higher, lower):
   # And finally we construct a list of values
   if pointTypes in int_bounds:
     nan = int_bounds[pointTypes][2]
+    knownValues = [v for v in unpackedSeries if v != nan]
+    neighborValues = (v if v != nan else 0 for v  in unpackedSeries)
   else:
-    nan = float('NaN')
+    knownValues = [v for v in unpackedSeries if not isnan(v)]
+    neighborValues = (0 if isnan(v) else v for v  in unpackedSeries)
 
-  knownValues = [v for v in unpackedSeries if v != nan]
-  neighborValues = (v if v != nan else 0 for v  in unpackedSeries)
   if not knownValues:
     return False
 
@@ -1087,7 +1088,6 @@ archive on a read and request data older than the archive's retention
     nan = int_bounds[pointTypes][2]
     valueList = [None if v == nan else v for v in unpackedSeries]
   else:
-    isnan = math.isnan
     valueList = [None if isnan(v) else v for v in unpackedSeries]
 
   if untilInterval - baseInterval > step:
