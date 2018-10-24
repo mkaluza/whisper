@@ -289,13 +289,12 @@ def __readHeader(fh):
     if info:
       return info
 
-  originalOffset = fh.tell()
   fh.seek(0)
-  packedMetadata = fh.read(metadataSize)
+  packedMetadata = fh.read(4096)
 
   try:
     (aggregationType, maxRetention, xff, archiveCount) \
-        = struct.unpack(metadataFormat, packedMetadata)
+        = struct.unpack_from(metadataFormat, packedMetadata)
   except (struct.error, ValueError, TypeError):
     raise CorruptWhisperFile("Unable to read header", fh.name)
 
@@ -309,10 +308,11 @@ def __readHeader(fh):
 
   archives = []
 
+  if metadataSize + archiveCount * archiveInfoSize > 4096:
+    packedMetadata += fh.read(metadataSize + archiveCount * archiveInfoSize - 4096)
   for i in xrange(archiveCount):
-    packedArchiveInfo = fh.read(archiveInfoSize)
     try:
-      (offset, secondsPerPoint, points, lastTimestamp, lastIndex, fmt) = struct.unpack(archiveInfoFormat, packedArchiveInfo)
+      (offset, secondsPerPoint, points, lastTimestamp, lastIndex, fmt) = struct.unpack_from(archiveInfoFormat, packedMetadata, metadataSize + i * archiveInfoSize)
     except (struct.error, ValueError, TypeError):
       raise CorruptWhisperFile("Unable to read archive%d metadata" % i, fh.name)
 
@@ -331,7 +331,6 @@ def __readHeader(fh):
     }
     archives.append(archiveInfo)
 
-  fh.seek(originalOffset)
   info = {
     'aggregationMethod': aggregationTypeToMethod.get(aggregationType, 'average'),
     'maxRetention': maxRetention,
