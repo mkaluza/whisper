@@ -103,6 +103,7 @@ FADVISE_RANDOM = False
 # a full scan of the file in order to minimize cache thrashing.
 BUFFERING = 0
 __headerCache = {}
+__parserCache = {}
 
 longFormat = "!L"
 longSize = struct.calcsize(longFormat)
@@ -316,7 +317,9 @@ def __readHeader(fh):
     except (struct.error, ValueError, TypeError):
       raise CorruptWhisperFile("Unable to read archive%d metadata" % i, fh.name)
 
-    parser = struct.Struct(fmt)
+    if fmt not in __parserCache: __parserCache[fmt] = struct.Struct(fmt)
+    parser = __parserCache[fmt]
+
     archiveInfo = {
       'offset': offset,
       'secondsPerPoint': secondsPerPoint,
