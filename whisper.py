@@ -153,6 +153,30 @@ int_bounds = {
   'Q': (0, 2**64-2, 2**64-1),
 }
 
+
+class ArchiveInfo(object):
+  __slots__ = ('offset', 'secondsPerPoint', 'points', 'retention', 'parser', 'size', 'lastTimestamp', 'lastIndex')
+  def __init__(self, offset, secondsPerPoint, points, parser, lastTimestamp, lastIndex):
+    self.offset = offset
+    self.secondsPerPoint = secondsPerPoint
+    self.points = points
+    self.retention = secondsPerPoint * points
+    self.parser = parser
+    self.size = parser.size * points
+    self.lastTimestamp = lastTimestamp
+    self.lastIndex = lastIndex
+    #TODO retention and size can be replaced with calculated properties
+
+
+class Header(object):
+  __slots__ = ('aggregationMethod', 'maxRetention', 'xFilesFactor', 'archives')
+  def __init__(self, aggregationMethod, maxRetention, xFilesFactor, archives):
+    self.aggregationMethod = aggregationMethod
+    self.maxRetention = maxRetention
+    self.xFilesFactor = xFilesFactor
+    self.archives = archives
+
+
 def getUnitString(s):
   for value in ('seconds', 'minutes', 'hours', 'days', 'weeks', 'years'):
     if value.startswith(s):
@@ -320,24 +344,10 @@ def __readHeader(fh):
     if fmt not in __parserCache: __parserCache[fmt] = struct.Struct(fmt)
     parser = __parserCache[fmt]
 
-    archiveInfo = {
-      'offset': offset,
-      'secondsPerPoint': secondsPerPoint,
-      'points': points,
-      'retention': secondsPerPoint * points,        #TODO this might be removed
-      'parser': parser,
-      'size': points * parser.size,                 #TODO this might be removed
-      'lastTimestamp': lastTimestamp,
-      'lastIndex': lastIndex,
-    }
-    archives.append(archiveInfo)
+    archives.append(ArchiveInfo(offset, secondsPerPoint, points, parser, lastTimestamp, lastIndex))
 
-  info = {
-    'aggregationMethod': aggregationTypeToMethod.get(aggregationType, 'average'),
-    'maxRetention': maxRetention,
-    'xFilesFactor': xff,
-    'archives': archives,
-  }
+  info = Header(aggregationTypeToMethod.get(aggregationType, 'average'), maxRetention, xff, archives)
+
   if CACHE_HEADERS:
     __headerCache[fh.name] = info
 
@@ -386,13 +396,13 @@ def __setAggregation(path, aggregationMethod=None, xFilesFactor=None):
     info = __readHeader(fh)
 
     if xFilesFactor is None:
-      xFilesFactor = info['xFilesFactor']
+      xFilesFactor = info.xFilesFactor
 
     if aggregationMethod is None:
-      aggregationMethod = info['aggregationMethod']
+      aggregationMethod = info.aggregationMethod
 
-    __writeHeaderMetadata(fh, aggregationMethod, info['maxRetention'],
-                          xFilesFactor, len(info['archives']))
+    __writeHeaderMetadata(fh, aggregationMethod, info.maxRetention,
+                          xFilesFactor, len(info.archives))
 
     if AUTOFLUSH:
       fh.flush()
@@ -401,7 +411,7 @@ def __setAggregation(path, aggregationMethod=None, xFilesFactor=None):
     if CACHE_HEADERS and fh.name in __headerCache:
       del __headerCache[fh.name]
 
-  return (info['aggregationMethod'], info['xFilesFactor'])
+  return (info.aggregationMethod, info.xFilesFactor)
 
 
 def __writeHeaderMetadata(fh, aggregationMethod, maxRetention, xFilesFactor, archiveCount):
@@ -603,12 +613,12 @@ def aggregate(aggregationMethod, knownValues, neighborValues=None):
 def save_archive_headers(fh, archives):
   fh.seek(metadataSize)
   for arch in archives:
-    packedArchiveInfo = struct.pack(archiveInfoFormat, arch['offset'], arch['secondsPerPoint'], arch['points'], arch['lastTimestamp'], arch['lastIndex'], arch['parser'].format)
+    packedArchiveInfo = struct.pack(archiveInfoFormat, arch.offset, arch.secondsPerPoint, arch.points, arch.lastTimestamp, arch.lastIndex, arch.parser.format)
     fh.write(packedArchiveInfo)
 
 
 def update_archive(fh, archive, myInterval, value):
-  parser = archive['parser']
+  parser = archive.parser
   if parser.format[-1] in int_bounds:
     bmin, bmax, nan = int_bounds[parser.format[-1]]
     value = min(bmax, max(bmin, int(value)))
@@ -618,58 +628,58 @@ def update_archive(fh, archive, myInterval, value):
 
   myPackedPoint = parser.pack(value)
 
-  timeDistance = myInterval - archive['lastTimestamp']
-  pointDistance = timeDistance // archive['secondsPerPoint']
-  pointIndex = (archive['lastIndex'] + pointDistance) % archive['points']
+  timeDistance = myInterval - archive.lastTimestamp
+  pointDistance = timeDistance // archive.secondsPerPoint
+  pointIndex = (archive.lastIndex + pointDistance) % archive.points
   if pointDistance <= 1:
-    fh.seek(archive['offset'] + pointIndex * parser.size)
+    fh.seek(archive.offset + pointIndex * parser.size)
     fh.write(myPackedPoint)
   else:
     nan = parser.pack(nan)
-    fh.seek(archive['offset'] + (archive['lastIndex'] + 1) * parser.size)
-    if archive['lastIndex'] < pointIndex:
-      fh.write(nan * (pointIndex - archive['lastIndex'] - 1) + myPackedPoint)
+    fh.seek(archive.offset + (archive.lastIndex + 1) * parser.size)
+    if archive.lastIndex < pointIndex:
+      fh.write(nan * (pointIndex - archive.lastIndex - 1) + myPackedPoint)
     else:
-      fh.write(nan * (archive['points'] - archive['lastIndex'] - 1))
-      fh.seek(archive['offset'])
+      fh.write(nan * (archive.points - archive.lastIndex - 1))
+      fh.seek(archive.offset)
       fh.write(nan * pointIndex + myPackedPoint)
-  archive['lastIndex'] = pointIndex
-  archive['lastTimestamp'] = myInterval
+  archive.lastIndex = pointIndex
+  archive.lastTimestamp = myInterval
 
 
 def __propagate(fh, header, timestamp, higher, lower):
-  aggregationMethod = header['aggregationMethod']
-  xff = header['xFilesFactor']
+  aggregationMethod = header.aggregationMethod
+  xff = header.xFilesFactor
 
-  lowerIntervalStart = timestamp - (timestamp % lower['secondsPerPoint'])
+  lowerIntervalStart = timestamp - (timestamp % lower.secondsPerPoint)
 
-  higherParser = higher['parser']
+  higherParser = higher.parser
   pointSize = higherParser.size
-  higherBaseInterval = higher['lastTimestamp']
+  higherBaseInterval = higher.lastTimestamp
 
   if higherBaseInterval == 0:
     relativeFirstOffset = 0
     pointDistance = 0
   else:
     timeDistance = lowerIntervalStart - higherBaseInterval
-    pointDistance = timeDistance // higher['secondsPerPoint']
-    pointIndex = (higher['lastIndex'] + pointDistance) % higher['points']
+    pointDistance = timeDistance // higher.secondsPerPoint
+    pointIndex = (higher.lastIndex + pointDistance) % higher.points
     relativeFirstOffset = pointIndex * pointSize
 
-  totalPoints = lower['secondsPerPoint'] // higher['secondsPerPoint']
+  totalPoints = lower.secondsPerPoint // higher.secondsPerPoint
   higherPoints = -pointDistance + 1
   higherSize = higherPoints * pointSize
-  relativeLastOffset = (relativeFirstOffset + higherSize) % higher['size']
-  higherFirstOffset = relativeFirstOffset + higher['offset']
-  higherLastOffset = relativeLastOffset + higher['offset']
+  relativeLastOffset = (relativeFirstOffset + higherSize) % higher.size
+  higherFirstOffset = relativeFirstOffset + higher.offset
+  higherLastOffset = relativeLastOffset + higher.offset
   fh.seek(higherFirstOffset)
 
   if relativeFirstOffset < relativeLastOffset:  # We don't wrap the archive
     seriesString = fh.read(higherSize)
   else:  # We do wrap the archive
-    higherTail = higher['size'] - relativeFirstOffset
+    higherTail = higher.size - relativeFirstOffset
     seriesString = fh.read(higherTail)
-    fh.seek(higher['offset'])
+    fh.seek(higher.offset)
     seriesString += fh.read(relativeLastOffset)
 
   # Now we unpack the series data we just read
@@ -727,20 +737,20 @@ def file_update(fh, value, timestamp, now=None):
 
   timestamp = int(timestamp)
   diff = now - timestamp
-  if not ((diff < header['maxRetention']) and diff >= 0):
+  if not ((diff < header.maxRetention) and diff >= 0):
     raise TimestampNotCovered(
       "Timestamp not covered by any archives in this database.")
 
   # Find the highest-precision archive that covers timestamp
-  for i, archive in enumerate(header['archives']):
-    if archive['retention'] < diff:
+  for i, archive in enumerate(header.archives):
+    if archive.retention < diff:
       continue
     # We'll pass on the update to these lower precision archives later
-    lowerArchives = header['archives'][i + 1:]
+    lowerArchives = header.archives[i + 1:]
     break
 
   # First we update the highest-precision archive
-  myInterval = timestamp - (timestamp % archive['secondsPerPoint'])
+  myInterval = timestamp - (timestamp % archive.secondsPerPoint)
   update_archive(fh, archive, myInterval, value)
 
   # Now we propagate the update to lower-precision archives
@@ -750,7 +760,7 @@ def file_update(fh, value, timestamp, now=None):
       break
     higher = lower
 
-  save_archive_headers(fh, header['archives'])
+  save_archive_headers(fh, header.archives)
 
   if AUTOFLUSH:
     fh.flush()
@@ -780,14 +790,14 @@ def file_update_many(fh, points, now=None):
   header = __readHeader(fh)
   if now is None:
     now = int(time.time())
-  archives = iter(header['archives'])
+  archives = iter(header.archives)
   currentArchive = next(archives)
   currentPoints = []
 
   for point in points:
     age = now - point[0]
 
-    while currentArchive['retention'] < age:  # We can't fit any more points in this archive
+    while currentArchive.retention < age:  # We can't fit any more points in this archive
       if currentPoints:  # Commit all the points we've found that it can fit
         currentPoints.reverse()  # Put points in chronological order
         __archive_update_many(fh, header, currentArchive, currentPoints)
@@ -808,7 +818,7 @@ def file_update_many(fh, points, now=None):
     currentPoints.reverse()
     __archive_update_many(fh, header, currentArchive, currentPoints)
 
-  save_archive_headers(fh, header['archives'])
+  save_archive_headers(fh, header.archives)
 
   if AUTOFLUSH:
     fh.flush()
@@ -816,8 +826,8 @@ def file_update_many(fh, points, now=None):
 
 
 def __archive_update_many(fh, header, archive, points):
-  step = archive['secondsPerPoint']
-  parser = archive['parser']
+  step = archive.secondsPerPoint
+  parser = archive.parser
   pointSize = parser.size
   if parser.format[-1] in int_bounds:
     bmin, bmax, nan = int_bounds[parser.format[-1]]
@@ -857,23 +867,23 @@ def __archive_update_many(fh, header, archive, points):
 
   # Write all of our packed strings in locations determined by the baseInterval
   for (interval, packedString) in packedStrings:
-    baseInterval = archive['lastTimestamp']  # Use our first string as the base, so we start at the start
+    baseInterval = archive.lastTimestamp  # Use our first string as the base, so we start at the start
     timeDistance = interval - baseInterval
     pointDistance = timeDistance // step
-    pointIndex = (archive['lastIndex'] + pointDistance) % archive['points']
+    pointIndex = (archive.lastIndex + pointDistance) % archive.points
 
-    myOffset = archive['offset'] + pointIndex * pointSize
-    archiveEnd = archive['offset'] + archive['size']
+    myOffset = archive.offset + pointIndex * pointSize
+    archiveEnd = archive.offset + archive.size
     bytesBeyond = (myOffset + len(packedString)) - archiveEnd
 
     #TODO join those two ifs?
     if pointDistance > 1:
-      fh.seek(archive['offset'] + (archive['lastIndex'] + 1) * parser.size)
-      if archive['lastIndex'] < pointIndex:
-        fh.write(nan * (pointIndex - archive['lastIndex'] - 1))
+      fh.seek(archive.offset + (archive.lastIndex + 1) * parser.size)
+      if archive.lastIndex < pointIndex:
+        fh.write(nan * (pointIndex - archive.lastIndex - 1))
       else:
-        fh.write(nan * (archive['points'] - archive['lastIndex'] - 1))
-        fh.seek(archive['offset'])
+        fh.write(nan * (archive.points - archive.lastIndex - 1))
+        fh.seek(archive.offset)
         fh.write(nan * pointIndex)
     else:
       fh.seek(myOffset)
@@ -884,24 +894,24 @@ def __archive_update_many(fh, header, archive, points):
         "archiveEnd=%d fh.tell=%d bytesBeyond=%d len(packedString)=%d" %
         (archiveEnd, fh.tell(), bytesBeyond, len(packedString))
       )
-      fh.seek(archive['offset'])
+      fh.seek(archive.offset)
       # Safe because it can't exceed the archive (retention checking logic above)
       fh.write(packedString[-bytesBeyond:])
     else:
       fh.write(packedString)
 
     numberOfPoints = len(packedString) / pointSize - 1
-    archive['lastIndex'] = (pointIndex  + numberOfPoints) % archive['points']
-    archive['lastTimestamp'] = interval + numberOfPoints * step
+    archive.lastIndex = (pointIndex  + numberOfPoints) % archive.points
+    archive.lastTimestamp = interval + numberOfPoints * step
 
   # Now we propagate the updates to lower-precision archives
   higher = archive
-  lowerArchives = [arc for arc in header['archives']
-                   if arc['secondsPerPoint'] > archive['secondsPerPoint']]
+  lowerArchives = [arc for arc in header.archives
+                   if arc.secondsPerPoint > archive.secondsPerPoint]
 
   for lower in lowerArchives:
     def fit(i):
-      return i - (i % lower['secondsPerPoint'])
+      return i - (i % lower.secondsPerPoint)
     lowerIntervals = [fit(p[0]) for p in alignedPoints]
     uniqueLowerIntervals = set(lowerIntervals)
     propagateFurther = False
@@ -962,7 +972,7 @@ def file_fetch(fh, fromTime, untilTime, now=None, archiveToSelect=None):
         "Invalid time interval: from time '%s' is after until time '%s'" %
         (fromTime, untilTime))
 
-  oldestTime = now - header['maxRetention']
+  oldestTime = now - header.maxRetention
   # Range is in the future
   if fromTime > now:
     return None
@@ -983,13 +993,13 @@ def file_fetch(fh, fromTime, untilTime, now=None, archiveToSelect=None):
     retentionStr = str(archiveToSelect) + ":1"
     archiveToSelect = parseRetentionDef(retentionStr)[0]
 
-  for archive in header['archives']:
+  for archive in header.archives:
     if archiveToSelect:
-      if archive['secondsPerPoint'] == archiveToSelect:
+      if archive.secondsPerPoint == archiveToSelect:
         break
       archive = None
     else:
-      if archive['retention'] >= diff:
+      if archive.retention >= diff:
         break
 
   if archiveToSelect and not archive:
@@ -1004,7 +1014,7 @@ Fetch data from a single archive. Note that checks for validity of the time
 period requested happen above this level so it's possible to wrap around the
 archive on a read and request data older than the archive's retention
 """
-  step = archive['secondsPerPoint']
+  step = archive.secondsPerPoint
 
   fromInterval = int(fromTime - (fromTime % step)) + step
 
@@ -1014,10 +1024,10 @@ archive on a read and request data older than the archive's retention
     # Zero-length time range: always include the next point
     untilInterval += step
 
-  parser = archive['parser']
+  parser = archive.parser
   pointSize = parser.size
 
-  baseInterval = archive['lastTimestamp']
+  baseInterval = archive.lastTimestamp
   if baseInterval == 0:
     points = (untilInterval - fromInterval) // step
     timeInfo = (fromInterval, untilInterval, step)
@@ -1027,24 +1037,24 @@ archive on a read and request data older than the archive's retention
   # Determine fromOffset
   timeDistance = fromInterval - baseInterval
   pointDistance = timeDistance // step
-  pointIndex = (archive['lastIndex'] + pointDistance) % archive['points']
-  fromOffset = archive['offset'] + pointIndex * parser.size
+  pointIndex = (archive.lastIndex + pointDistance) % archive.points
+  fromOffset = archive.offset + pointIndex * parser.size
 
   # Determine untilOffset
   timeDistance = min(untilInterval - baseInterval, step)
   pointDistance = timeDistance // step
-  pointIndex = (archive['lastIndex'] + pointDistance) % archive['points']
-  untilOffset = archive['offset'] + pointIndex * parser.size
+  pointIndex = (archive.lastIndex + pointDistance) % archive.points
+  untilOffset = archive.offset + pointIndex * parser.size
 
   # Read all the points in the interval
   fh.seek(fromOffset)
   if fromOffset < untilOffset:  # If we don't wrap around the archive
     seriesString = fh.read(untilOffset - fromOffset)
   else:  # We do wrap around the archive, so we need two reads
-    archiveEnd = archive['offset'] + archive['size']
+    archiveEnd = archive.offset + archive.size
     seriesString = fh.read(archiveEnd - fromOffset)
-    fh.seek(archive['offset'])
-    seriesString += fh.read(untilOffset - archive['offset'])
+    fh.seek(archive.offset)
+    seriesString += fh.read(untilOffset - archive.offset)
 
   # Now we unpack the series data we just read (anything faster than unpack?)
   byteOrder, pointTypes = parser.format[0], parser.format[1:]
@@ -1084,7 +1094,7 @@ def merge(path_from, path_to, time_from=None, time_to=None, now=None):
 def file_merge(fh_from, fh_to, time_from=None, time_to=None, now=None):
   headerFrom = __readHeader(fh_from)
   headerTo = __readHeader(fh_to)
-  if headerFrom['archives'] != headerTo['archives']:
+  if headerFrom.archives != headerTo.archives:
     raise NotImplementedError(
       "%s and %s archive configurations are unalike. "
       "Resize the input before merging" % (fh_from.name, fh_to.name))
@@ -1106,16 +1116,16 @@ def file_merge(fh_from, fh_to, time_from=None, time_to=None, now=None):
   if untilTime < fromTime:
     raise ValueError("time_to must be >= time_from")
 
-  archives = headerFrom['archives']
+  archives = headerFrom.archives
   archives.sort(key=operator.itemgetter('retention'))
 
   for archive in archives:
     archiveFrom = fromTime
     archiveTo = untilTime
-    if archiveFrom < now - archive['retention']:
-      archiveFrom = now - archive['retention']
+    if archiveFrom < now - archive.retention:
+      archiveFrom = now - archive.retention
     # if untilTime is too old, skip this archive
-    if archiveTo < now - archive['retention']:
+    if archiveTo < now - archive.retention:
       continue
     (timeInfo, values) = __archive_fetch(fh_from, archive, archiveFrom, archiveTo)
     (start, end, archive_step) = timeInfo
@@ -1139,13 +1149,13 @@ def file_diff(fh_from, fh_to, ignore_empty=False, until_time=None, now=None):
   headerFrom = __readHeader(fh_from)
   headerTo = __readHeader(fh_to)
 
-  if headerFrom['archives'] != headerTo['archives']:
+  if headerFrom.archives != headerTo.archives:
     # TODO: Add specific whisper-resize commands to right size things
     raise NotImplementedError(
         "%s and %s archive configurations are unalike. "
         "Resize the input before diffing" % (fh_from.name, fh_to.name))
 
-  archives = headerFrom['archives']
+  archives = headerFrom.archives
   archives.sort(key=operator.itemgetter('retention'))
 
   archive_diffs = []
@@ -1159,7 +1169,7 @@ def file_diff(fh_from, fh_to, ignore_empty=False, until_time=None, now=None):
 
   for archive_number, archive in enumerate(archives):
     diffs = []
-    startTime = now - archive['retention']
+    startTime = now - archive.retention
     (fromTimeInfo, fromValues) = \
         __archive_fetch(fh_from, archive, startTime, untilTime)
     (toTimeInfo, toValues) = __archive_fetch(fh_to, archive, startTime, untilTime)
