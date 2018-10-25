@@ -168,6 +168,20 @@ class ArchiveInfo(object):
     self.lastIndex = lastIndex
     #TODO retention and size can be replaced with calculated properties
 
+  @property
+  def format(self):
+    return self.parser.format
+
+  @property
+  def pointSize(self):
+    return self.parser.size
+
+  def __getitem__(self, name):
+    return getattr(self, name)
+
+  def __setitem__(self, name, value):
+    return setattr(self, name, value)
+
 
 class Header(object):
   __slots__ = ('aggregationMethod', 'maxRetention', 'xFilesFactor', 'archives')
@@ -176,6 +190,12 @@ class Header(object):
     self.maxRetention = maxRetention
     self.xFilesFactor = xFilesFactor
     self.archives = archives
+
+  def __getitem__(self, name):
+    return getattr(self, name)
+
+  def __setitem__(self, name, value):
+    return setattr(self, name, value)
 
 
 def getUnitString(s):
