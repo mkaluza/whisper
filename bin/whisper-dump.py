@@ -85,7 +85,7 @@ def read_header(mm):
 
 def dump_header(header):
   print('Meta data:')
-  print('  aggregation method: %s' % header['aggregationMethod'])
+  print('  aggregation method: %s' % whisper.aggregationTypeToMethod[header['aggregationMethod']])
   print('  max retention: %d' % header['maxRetention'])
   print('  xFilesFactor: %g' % header['xFilesFactor'])
   print("")

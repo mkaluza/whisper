@@ -128,6 +128,7 @@ aggregationTypeToMethod = dict({
 })
 aggregationMethodToType = dict([[v, k] for k, v in aggregationTypeToMethod.items()])
 aggregationMethods = aggregationTypeToMethod.values()
+for k, v in aggregationMethodToType.items(): globals()["AGG_"+k.upper()] = v
 
 debug = startBlock = endBlock = lambda *a, **k: None
 
@@ -346,7 +347,7 @@ def __readHeader(fh):
 
     archives.append(ArchiveInfo(offset, secondsPerPoint, points, parser, lastTimestamp, lastIndex))
 
-  info = Header(aggregationTypeToMethod.get(aggregationType, 'average'), maxRetention, xff, archives)
+  info = Header(aggregationType, maxRetention, xff, archives)
 
   if CACHE_HEADERS:
     __headerCache[fh.name] = info
@@ -586,24 +587,24 @@ def create(path, archiveList, xFilesFactor=None, aggregationMethod=None,
 
 
 def aggregate(aggregationMethod, knownValues, neighborValues=None):
-  if aggregationMethod == 'average':
+  if aggregationMethod == AGG_AVERAGE:
     return float(sum(knownValues)) / float(len(knownValues))
-  elif aggregationMethod == 'sum':
+  elif aggregationMethod == AGG_SUM:
     return float(sum(knownValues))
-  elif aggregationMethod == 'last':
+  elif aggregationMethod == AGG_LAST:
     return knownValues[-1]
-  elif aggregationMethod == 'max':
+  elif aggregationMethod == AGG_MAX:
     return max(knownValues)
-  elif aggregationMethod == 'min':
+  elif aggregationMethod == AGG_MIN:
     return min(knownValues)
-  elif aggregationMethod == 'avg_zero':
+  elif aggregationMethod == AGG_AVG_ZERO:
     if not neighborValues:
       raise InvalidAggregationMethod("Using avg_zero without neighborValues")
     values = [x or 0 for x in neighborValues]
     return float(sum(values)) / float(len(values))
-  elif aggregationMethod == 'absmax':
+  elif aggregationMethod == AGG_ABSMAX:
     return max(knownValues, key=abs)
-  elif aggregationMethod == 'absmin':
+  elif aggregationMethod == AGG_ABSMIN:
     return min(knownValues, key=abs)
   else:
     raise InvalidAggregationMethod(
