@@ -157,7 +157,7 @@ int_bounds = {
 
 
 class ArchiveInfo(object):
-  __slots__ = ('offset', 'secondsPerPoint', 'points', 'retention', 'parser', 'size', 'lastTimestamp', 'lastIndex')
+  __slots__ = ('offset', 'secondsPerPoint', 'points', 'retention', 'parser', 'size', 'lastTimestamp', 'lastIndex', 'lastAggregateTimestamp', 'lastAggregateValue', 'lastAggregateParams')
   def __init__(self, offset, secondsPerPoint, points, parser, lastTimestamp, lastIndex):
     self.offset = offset
     self.secondsPerPoint = secondsPerPoint
@@ -167,6 +167,9 @@ class ArchiveInfo(object):
     self.size = parser.size * points
     self.lastTimestamp = lastTimestamp
     self.lastIndex = lastIndex
+    self.lastAggregateTimestamp = 0
+    self.lastAggregateValue = 0
+    self.lastAggregateParams = 0
     #TODO retention and size can be replaced with calculated properties
 
   @property
@@ -638,8 +641,9 @@ def save_archive_headers(fh, archives):
   fh.write("".join([pack(arch.offset, arch.secondsPerPoint, arch.points, arch.lastTimestamp, arch.lastIndex, arch.parser.format) for arch in archives]))
 
 
-def update_archive(fh, archive, myInterval, value):
+def update_archive(fh, archive, myInterval, value, returnPrev = False):
   parser = archive.parser
+  prev = None
   if parser.format[-1] in int_bounds:
     bmin, bmax, nan = int_bounds[parser.format[-1]]
     value = min(bmax, max(bmin, int(value)))
@@ -654,6 +658,10 @@ def update_archive(fh, archive, myInterval, value):
   pointIndex = (archive.lastIndex + pointDistance) % archive.points
   if pointDistance <= 1:
     fh.seek(archive.offset + pointIndex * parser.size)
+    if returnPrev:
+      prev, = parser.unpack(fh.read(parser.size))
+      if prev == nan or isnan(float(prev)): prev = None
+      fh.seek(archive.offset + pointIndex * parser.size)
     fh.write(myPackedPoint)
   else:
     nan = parser.pack(nan)
@@ -666,6 +674,7 @@ def update_archive(fh, archive, myInterval, value):
       fh.write(nan * pointIndex + myPackedPoint)
   archive.lastIndex = pointIndex
   archive.lastTimestamp = myInterval
+  return prev
 
 
 def __propagate(fh, header, timestamp, higher, lower):
@@ -726,11 +735,101 @@ def __propagate(fh, header, timestamp, higher, lower):
     aggregateValue = aggregate(aggregationMethod, knownValues, neighborValues)
     #print "aggregate: %s for %s is %s" % (aggregationMethod, knownValues, aggregateValue)
     update_archive(fh, lower, lowerIntervalStart, aggregateValue)
-
-    return True
-
+    return aggregateValue
   else:
     return False
+
+
+def __do_online_aggregate(aggregationMethod, archive, timestamp, value, oldVal):
+  if aggregationMethod == AGG_AVERAGE:
+    n = archive.lastAggregateParams
+    a = archive.lastAggregateValue * n + value - (oldVal or 0)
+    if oldVal == None: n += 1
+    archive.lastAggregateValue = a/n
+    archive.lastAggregateParams = n
+  elif aggregationMethod == AGG_SUM:
+    archive.lastAggregateValue += value - (oldVal or 0)
+  elif aggregationMethod == AGG_LAST:
+    if archive.lastAggregateParams >= timestamp:
+      archive.lastAggregateValue = value
+      archive.lastAggregateParams = timestamp
+  elif aggregationMethod == AGG_MAX:
+    if value >= archive.lastAggregateValue:
+      archive.lastAggregateValue = value
+    elif oldVal != None and oldVal == archive.lastAggregateValue:
+      #FIXME tradycyjnie to trzeba policzyc
+      return False
+  elif aggregationMethod == AGG_MIN:
+    if value <= archive.lastAggregateValue:
+      archive.lastAggregateValue = value
+    elif oldVal != None and oldVal == archive.lastAggregateValue:
+      #FIXME tradycyjnie to trzeba policzyc
+      return False
+  elif aggregationMethod == AGG_AVG_ZERO:
+    raise NotImplementedError()
+    if not neighborValues:
+      raise InvalidAggregationMethod("Using avg_zero without neighborValues")
+    values = [x or 0 for x in neighborValues]
+    return float(sum(values)) / float(len(values))
+  elif aggregationMethod == AGG_ABSMAX:
+    return max(knownValues, key=abs)
+  elif aggregationMethod == AGG_ABSMIN:
+    return min(knownValues, key=abs)
+  else:
+    raise InvalidAggregationMethod(
+      "Unrecognized aggregation method %s" % aggregationMethod)
+  return True
+
+
+def __init_online_aggregate(aggregationMethod, archive, timestamp, value):
+  if aggregationMethod == AGG_AVERAGE:
+    archive.lastAggregateValue = float(value)
+    archive.lastAggregateParams = 1
+  elif aggregationMethod == AGG_SUM:
+    archive.lastAggregateValue = value
+  elif aggregationMethod == AGG_LAST:
+    archive.lastAggregateValue = value
+    archive.lastAggregateParams = timestamp
+  elif aggregationMethod == AGG_MAX:
+    archive.lastAggregateValue = value
+  elif aggregationMethod == AGG_MIN:
+    archive.lastAggregateValue = value
+  elif aggregationMethod == AGG_AVG_ZERO:
+    archive.lastAggregateValue = float(value)
+    archive.lastAggregateParams = 1
+  elif aggregationMethod == AGG_ABSMAX:
+    archive.lastAggregateParams = abs(value)
+  elif aggregationMethod == AGG_ABSMIN:
+    archive.lastAggregateParams = abs(value)
+  else:
+    raise InvalidAggregationMethod(
+      "Unrecognized aggregation method %s" % aggregationMethod)
+
+
+def __aggregate(fh, header, timestamp, value, level, oldVal = None):
+  lower = header.archives[level]
+  lowerIntervalStart = timestamp - (timestamp % lower.secondsPerPoint)
+  if lower.lastAggregateTimestamp == lowerIntervalStart:
+    oldAggVal = lower.lastAggregateValue
+    if not __do_online_aggregate(header.aggregationMethod, lower, timestamp, value, oldVal):
+      value = __propagate(fh, header, timestamp, header.archives[level-1], lower)
+      __init_online_aggregate(header.aggregationMethod, lower, timestamp, value)
+    else:
+      value = lower.lastAggregateValue
+    level += 1
+    if value != False and level < len(header.archives): __aggregate(fh, header, lowerIntervalStart, value, level, oldAggVal)
+  elif lower.lastAggregateTimestamp < lowerIntervalStart:
+    update_archive(fh, lower, lower.lastAggregateTimestamp, lower.lastAggregateValue)
+    __init_online_aggregate(header.aggregationMethod, lower, timestamp, value)
+    lower.lastAggregateTimestamp = lowerIntervalStart
+    value = lower.lastAggregateValue
+    level += 1
+    if value != False and level < len(header.archives): __aggregate(fh, header, lowerIntervalStart, value, level)
+  else:
+    value = __propagate(fh, header, timestamp, header.archives[level-1], lower)
+    if value != False:
+      level += 1
+      if  level < len(header.archives): __aggregate(fh, header, lowerIntervalStart, value, level)
 
 
 def update(path, value, timestamp=None, now=None):
@@ -764,23 +863,26 @@ def file_update(fh, value, timestamp, now=None):
       "Timestamp not covered by any archives in this database.")
 
   # Find the highest-precision archive that covers timestamp
-  for i, archive in enumerate(header.archives):
+  for level, archive in enumerate(header.archives):
     if archive.retention < diff:
       continue
     # We'll pass on the update to these lower precision archives later
-    lowerArchives = header.archives[i + 1:]
     break
 
+  level += 1
   # First we update the highest-precision archive
   myInterval = timestamp - (timestamp % archive.secondsPerPoint)
-  update_archive(fh, archive, myInterval, value)
+  append = True
+  if myInterval <= archive.lastTimestamp:
+    append = False
+
+  prevValue = update_archive(fh, archive, myInterval, value, append == False)
 
   # Now we propagate the update to lower-precision archives
-  higher = archive
-  for lower in lowerArchives:
-    if not __propagate(fh, header, myInterval, higher, lower):
-      break
-    higher = lower
+  if level < len(header.archives): __aggregate(fh, header, myInterval, value, level, prevValue)
+
+  if append:
+    archive.lastTimestamp = myInterval
 
   save_archive_headers(fh, header.archives)
 
@@ -938,12 +1040,20 @@ def __archive_update_many(fh, header, archive, points):
     uniqueLowerIntervals = set(lowerIntervals)
     propagateFurther = False
     for interval in uniqueLowerIntervals:
-      if __propagate(fh, header, interval, higher, lower):
+      if __propagate(fh, header, interval, higher, lower) != False:
         propagateFurther = True
 
     if not propagateFurther:
       break
     higher = lower
+
+
+def flush(path):
+  with open(path, 'r+b', BUFFERING) as fh:
+    header = __readHeader(fh)
+    for arch in header.archives[1:]:
+      update_archive(fh, arch, arch.lastAggregateTimestamp, arch.lastAggregateValue)
+    save_archive_headers(fh, header.archives)
 
 
 def info(path):
